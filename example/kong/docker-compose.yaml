@@ -17,7 +17,7 @@ networks:
 
 services:
   kong:
-    image: "kong/incubator:gateway-wasmer-3.0.0.0"
+    image: "kong/kong:nightly"
     user: "${KONG_USER:-kong}"
     environment:
       KONG_DATABASE: "off"
@@ -30,7 +30,7 @@ services:
       KONG_PREFIX: ${KONG_PREFIX:-/var/run/kong}
       KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
       KONG_WASM: "on"
-      KONG_WASM_MODULES: "/wasm/main.wasm"
+      KONG_WASM_FILTERS_PATH: "/wasm"
     networks:
       - kong-net
     ports:

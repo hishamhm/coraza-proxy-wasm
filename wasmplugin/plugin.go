@@ -108,6 +108,7 @@ type httpContext struct {
 	bodyReadIndex         int
 	metrics               *wafMetrics
 	interruptionHandled   bool
+	interruptionStatus    int
 	logger                debuglog.Logger
 }
 
@@ -273,6 +274,14 @@ func (ctx *httpContext) OnHttpRequestBody(bodySize int, endOfStream bool) types.
 	return types.ActionPause
 }
 
+func getStatus() (int, error) {
+	h, err := proxywasm.GetHttpResponseHeader(":status")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(h)
+}
+
 func (ctx *httpContext) OnHttpResponseHeaders(numHeaders int, endOfStream bool) types.Action {
 	defer logTime("OnHttpResponseHeaders", currentTime())
 
@@ -282,13 +291,21 @@ func (ctx *httpContext) OnHttpResponseHeaders(numHeaders int, endOfStream bool) 
 		// downstream via the filter chain, therefore OnHttpResponseHeaders is called.
 		// We expect a response that is ending the stream, with exactly one header (:status) and no body.
 		// See https://github.com/corazawaf/coraza-proxy-wasm/pull/126
-		if numHeaders == 1 && endOfStream {
-			ctx.logger.Debug().Msg("Interruption already handled, sending downstream the local response")
-			return types.ActionContinue
-		} else {
-			ctx.logger.Error().Msg("Interruption already handled, unexpected local response")
-			return types.ActionPause
+		if endOfStream {
+			status, err := getStatus()
+			if err != nil {
+				ctx.logger.Error().Err(err).Msg("Failed to get status")
+				return types.ActionContinue
+			}
+
+			if ctx.interruptionStatus == status {
+				ctx.logger.Debug().Msg("Interruption already handled, sending downstream the local response")
+				return types.ActionContinue
+			}
 		}
+
+		ctx.logger.Error().Msg("Interruption already handled, unexpected local response")
+		return types.ActionPause
 	}
 
 	tx := ctx.tx
@@ -353,10 +370,15 @@ func (ctx *httpContext) OnHttpResponseBody(bodySize int, endOfStream bool) types
 		// If OnHttpResponseBody is called again and an interruption has already been raised, it means that
 		// we have to keep going with the sanitization of the response, emptying it.
 		// Sending the crafted HttpResponse with empty body, we don't expect to trigger OnHttpResponseBody
-		ctx.logger.Warn().
-			Msg("Response body interruption already handled, keeping replacing the body")
+
 		// Interruption happened, we don't want to send response body data
-		return replaceResponseBodyWhenInterrupted(ctx.logger, bodySize)
+		if bodySize > 0 {
+			ctx.logger.Warn().
+				Msg("Response body interruption already handled, keeping replacing the body")
+			return replaceResponseBodyWhenInterrupted(ctx.logger, bodySize)
+		}
+
+		return types.ActionContinue
 	}
 
 	tx := ctx.tx
@@ -481,6 +503,9 @@ func (ctx *httpContext) handleInterruption(phase string, interruption *ctypes.In
 	if statusCode == 0 {
 		statusCode = 403
 	}
+
+	ctx.interruptionStatus = statusCode
+
 	if err := proxywasm.SendHttpResponse(uint32(statusCode), nil, nil, noGRPCStream); err != nil {
 		panic(err)
 	}
